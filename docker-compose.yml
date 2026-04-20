@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  codegraph:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+      - ${REPO_PATH:-.}:/repo:ro
+    environment:
+      - CODEGRAPH_DATA_DIR=/data
+      - CODEGRAPH_GRAPHQL_PORT=8000
+      - CODEGRAPH_LOG_LEVEL=INFO
+    command: >
+      sh -c "codegraph index /repo --data-dir /data &&
+             codegraph serve --graphql-port 8000 --data-dir /data"
+    restart: unless-stopped
