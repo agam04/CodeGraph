@@ -111,6 +111,11 @@ class GraphBuilder:
                 stats.errors.append(msg)
                 log.error("index_error", file=str(file_path), error=str(e))
 
+        # Cross-file resolution: link unresolved import/call edges to actual nodes
+        resolved = self._resolve_cross_file_edges()
+        stats.edges_created += resolved
+        log.debug("cross_file_resolved", edges=resolved)
+
         stats.time_elapsed = time.monotonic() - start
         log.info(
             "build_complete",
@@ -122,6 +127,73 @@ class GraphBuilder:
             errors=len(stats.errors),
         )
         return stats
+
+    def _resolve_cross_file_edges(self) -> int:
+        """Post-index pass: resolve unresolved import/call edges to real target nodes.
+
+        When the analyzer stores IMPORTS edges, it uses a synthetic target ID derived
+        from the module name. After all files are indexed, we can look up the real
+        module node and add a resolved edge pointing to it.
+        """
+        from codegraph.graph.schema import Edge, EdgeType
+        from codegraph.graph.schema import NodeType
+
+        resolved = 0
+        new_edges: list[Edge] = []
+
+        # Walk every module node and try to resolve its IMPORTS edges
+        for module in self.store.get_all_nodes(NodeType.MODULE):
+            for edge in self.store.get_edges_from(module.id, EdgeType.IMPORTS):
+                if not edge.metadata.get("unresolved"):
+                    continue
+                target_module = edge.metadata.get("target_module", "")
+                if not target_module:
+                    continue
+
+                # Try to find the target module by qualified name or short name
+                target_node = self.store.get_node_by_qualified_name(target_module)
+                if target_node is None:
+                    # Try just the last segment (e.g. "models" from "sample_python_repo.models")
+                    short = target_module.split(".")[-1]
+                    target_node = self.store.get_node_by_name(short, NodeType.MODULE)
+
+                if target_node and target_node.id != edge.target_id:
+                    new_edges.append(Edge(
+                        source_id=module.id,
+                        target_id=target_node.id,
+                        edge_type=EdgeType.IMPORTS,
+                        metadata={"alias": edge.metadata.get("alias", ""), "resolved": True},
+                    ))
+                    resolved += 1
+
+        # Also resolve CALLS edges — match unresolved callee names to actual function nodes
+        for func in self.store.get_all_nodes(NodeType.FUNCTION) + self.store.get_all_nodes(NodeType.METHOD):
+            for edge in self.store.get_edges_from(func.id, EdgeType.CALLS):
+                callee_name = edge.metadata.get("unresolved_name", "")
+                if not callee_name:
+                    continue
+                # Try qualified name first, then short name
+                target = self.store.get_node_by_qualified_name(callee_name)
+                if target is None:
+                    short = callee_name.split(".")[-1]
+                    target = (
+                        self.store.get_node_by_name(short, NodeType.FUNCTION)
+                        or self.store.get_node_by_name(short, NodeType.METHOD)
+                    )
+                if target and target.id != edge.target_id:
+                    new_edges.append(Edge(
+                        source_id=func.id,
+                        target_id=target.id,
+                        edge_type=EdgeType.CALLS,
+                        metadata={"line": edge.metadata.get("line", 0), "resolved": True},
+                    ))
+                    resolved += 1
+
+        if new_edges:
+            self.store.upsert_edges(new_edges)
+            self.store.commit()
+
+        return resolved
 
 
 def _lang_for_suffix(suffix: str) -> str:

@@ -87,10 +87,21 @@ class GraphNode:
 @strawberry.type(description="Token-budgeted subgraph around a central symbol — the killer feature for agents.")
 class Subgraph:
     center_node: Optional[GraphNode] = strawberry.field(description="The requested symbol.")
-    related_nodes: list[GraphNode] = strawberry.field(description="All nodes within `depth` hops.")
+    related_nodes: list[GraphNode] = strawberry.field(description="All nodes within `depth` hops, ranked by fan-in score.")
     edges: list[GraphEdge] = strawberry.field(description="Edges connecting the subgraph.")
     summary: str = strawberry.field(description="Auto-generated text summary an agent can read directly.")
     estimated_tokens: int = strawberry.field(description="Approximate token cost of this subgraph.")
+    mermaid_diagram: str = strawberry.field(description="Mermaid flowchart of this subgraph — paste into markdown to visualize.")
+
+
+@strawberry.type(description="Impact analysis: what breaks if you change this symbol?")
+class ImpactAnalysis:
+    target: GraphNode = strawberry.field(description="The symbol being analyzed.")
+    immediate_callers: list[Function] = strawberry.field(description="Functions that directly call this symbol.")
+    transitive_callers: list[Function] = strawberry.field(description="All functions reachable through the call chain.")
+    affected_files: list[str] = strawberry.field(description="Unique files containing affected symbols.")
+    risk_level: str = strawberry.field(description="'low' | 'medium' | 'high' — based on caller count and reach.")
+    summary: str = strawberry.field(description="Human-readable impact summary safe to surface to an agent.")
 
 
 def _make_function(node) -> Optional[Function]:
@@ -234,12 +245,12 @@ def build_schema(store: GraphStore, retriever: RAGRetriever) -> strawberry.Schem
         def context_for(self, qualified_name: str, depth: int = 2) -> Subgraph:
             node = store.get_node_by_qualified_name(qualified_name)
             if node is None:
-                # Try by name
                 node = store.get_node_by_name(qualified_name)
             if node is None:
                 return Subgraph(
                     center_node=None, related_nodes=[], edges=[],
-                    summary=f"Symbol '{qualified_name}' not found.", estimated_tokens=0,
+                    summary=f"Symbol '{qualified_name}' not found.",
+                    estimated_tokens=0, mermaid_diagram="",
                 )
             from codegraph.config import get_config
             subgraph = gq.get_subgraph(store, node.id, depth=depth, max_tokens=get_config().max_subgraph_tokens)
@@ -249,9 +260,38 @@ def build_schema(store: GraphStore, retriever: RAGRetriever) -> strawberry.Schem
                 edges=[GraphEdge(**e) for e in subgraph["edges"]],
                 summary=subgraph["summary"],
                 estimated_tokens=subgraph["estimated_tokens"],
+                mermaid_diagram=gq.subgraph_to_mermaid(subgraph),
             )
 
-        @strawberry.field(description="Semantic search across documentation and docstrings.")
+        @strawberry.field(
+            description="Impact analysis: which functions and files would break if this symbol changed? "
+                        "Returns a risk level and full transitive call chain."
+        )
+        def impact_of(self, qualified_name: str, depth: int = 5) -> Optional[ImpactAnalysis]:
+            node = store.get_node_by_qualified_name(qualified_name) or store.get_node_by_name(qualified_name)
+            if not node:
+                return None
+            result = gq.impact_analysis(store, node.id, depth=depth)
+            if not result:
+                return None
+            return ImpactAnalysis(
+                target=_make_graph_node(result["center"]),
+                immediate_callers=[f for n in result["immediate_callers"] if (f := _make_function(n)) is not None],
+                transitive_callers=[f for n in result["transitive_callers"] if (f := _make_function(n)) is not None],
+                affected_files=result["affected_files"],
+                risk_level=result["risk_level"],
+                summary=result["summary"],
+            )
+
+        @strawberry.field(
+            description="Find functions with no callers — potential dead code. "
+                        "Excludes entry points, dunder methods, and test functions."
+        )
+        def dead_code(self) -> list[Function]:
+            nodes = gq.find_dead_code(store)
+            return [f for n in nodes if (f := _make_function(n)) is not None]
+
+        @strawberry.field(description="Semantic search across documentation and docstrings. Uses hybrid BM25 + vector search with Reciprocal Rank Fusion.")
         def search_docs(self, query: str, limit: int = 5) -> list[DocChunk]:
             chunks = retriever.search_docs(query, k=limit)
             return [_make_doc_chunk(c) for c in chunks]
@@ -264,7 +304,24 @@ def build_schema(store: GraphStore, retriever: RAGRetriever) -> strawberry.Schem
             chunks = retriever.docs_for_node(node.id)
             return [_make_doc_chunk(c) for c in chunks]
 
-        @strawberry.field(description="High-level overview of the indexed codebase.")
+        @strawberry.field(
+            description="Return the exact source code of a symbol — AST-verified ground truth. "
+                        "Use this instead of recalling an implementation from memory to prevent hallucination."
+        )
+        def get_source(self, qualified_name: str) -> Optional[str]:
+            node = store.get_node_by_qualified_name(qualified_name) or store.get_node_by_name(qualified_name)
+            if not node:
+                return None
+            try:
+                lines = __import__("pathlib").Path(node.file_path).read_text(errors="replace").splitlines()
+                start = max(0, node.start_line - 1)
+                end = min(len(lines), node.end_line)
+                return "\n".join(lines[start:end])
+            except OSError:
+                return None
+
+        @strawberry.field(
+            description="High-level overview of the indexed codebase.")
         def stats(self) -> CodebaseStats:
             s = store.stats()
             return CodebaseStats(
