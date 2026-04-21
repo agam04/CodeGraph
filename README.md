@@ -208,12 +208,17 @@ impact_analysis("auth.authenticate")
 graph LR
     Code[Source Files\nPy / JS / TS] --> Analyzers[AST Analyzers\ntree-sitter + stdlib ast]
     Analyzers --> Resolution[Cross-file\nResolution Pass]
-    Resolution --> Graph[Graph Store\nSQLite + NetworkX]
+    Resolution --> Graph[Graph Store\nSQLite]
     Graph --> GraphQL[GraphQL API\nStrawberry + FastAPI]
-    Graph --> RAG[Hybrid RAG\nBM25 + FAISS + RRF]
-    RAG --> GraphQL
-    GraphQL --> MCP[MCP Server\nFastMCP · 16 tools]
-    MCP --> Agent[AI Agent\nClaude / Cursor / Copilot]
+    Graph --> CodeBERT[CodeBERT\nCode Embeddings]
+    Graph --> MiniLM[all-MiniLM\nDoc Embeddings]
+    Graph --> CodeT5[CodeT5\nDocstring Generation]
+    CodeBERT --> RRF[Reciprocal\nRank Fusion]
+    MiniLM --> RRF
+    RRF --> MCP[MCP Server\nFastMCP · 16 tools]
+    GraphQL --> MCP
+    MCP --> Agent[AI Agent]
+    MCP --> LangChain[LangChain\nCodebaseQA]
     Agent -->|verify_signature\nget_source| MCP
 ```
 
@@ -266,18 +271,86 @@ GraphQL playground at `http://localhost:8000/graphql`.
 
 ---
 
+## HuggingFace Integration
+
+codegraph uses two specialised HuggingFace models, each where it does best:
+
+### Code-aware embeddings (CodeBERT)
+General text models embed `"def authenticate(user, pw)"` and `"iterate over items"` similarly because they share grammatical structure. **CodeBERT** (`microsoft/codebert-base`) was trained on 6 million code/docstring pairs — it understands that `hash_password` and `bcrypt.hashpw` are semantically the same operation.
+
+codegraph uses a **dual-model strategy**:
+- Code symbols (functions, classes) → `CodeBERT` embeddings — better semantic search against source code
+- Documentation (README, `/docs`, docstrings) → `all-MiniLM-L6-v2` — optimised for prose similarity
+
+Both indices are queried at search time and merged via Reciprocal Rank Fusion.
+
+### Auto-docstring generation (CodeT5)
+```bash
+# After indexing, generate docstrings for all undocumented functions
+codegraph enrich --data-dir ./data
+# → Generated: 23  Skipped: 41 (already documented)  Failed: 0
+```
+
+Uses `Salesforce/codet5-base-codexglue-sum-python` to generate a one-line summary for every function with no docstring. Stored under `metadata.generated_docstring` — always distinct from AST-extracted docstrings so provenance is clear.
+
+```python
+node.docstring            # "Authenticate a user..." — from AST (ground truth)
+node.metadata["generated_docstring"]     # "Verifies credentials and returns session." — CodeT5
+node.metadata["docstring_provenance"]    # "codet5_generated"
+```
+
+---
+
+## LangChain Integration
+
+codegraph exposes a `CodeGraphRetriever` and a `CodebaseQA` chain that plug into any LangChain pipeline.
+
+### CodebaseQA — chat with your codebase
+```python
+from codegraph.langchain import build_codebase_qa
+from langchain_anthropic import ChatAnthropic
+
+qa = build_codebase_qa(store, rag_retriever, llm=ChatAnthropic(model="claude-sonnet-4-6"))
+
+result = qa.ask("What would break if I changed the User model?")
+# → answer: "3 functions directly depend on User: authenticate() (auth.py:14),
+#            login() (api.py:8), register_user() (api.py:31). Medium risk."
+# → sources: ["auth.py", "api.py", "models.py"]
+```
+
+Every answer is grounded in the codegraph knowledge base — the LLM cannot hallucinate function signatures, file paths, or call relationships because the retriever supplies verified facts.
+
+### CodeGraphRetriever — use codegraph in any LangChain chain
+```python
+from codegraph.langchain import CodeGraphRetriever
+
+retriever = CodeGraphRetriever(store=store, rag=rag_retriever, k=5)
+
+# Works with any LangChain chain
+docs = retriever.invoke("how does session management work?")
+# Each Document has metadata: source, result_kind, start_line, qualified_name
+```
+
+### Install LangChain extras
+```bash
+pip install "codegraph[langchain]"
+# Installs: langchain, langchain-community, langchain-anthropic, langchain-huggingface
+```
+
+---
+
 ## Comparison with Alternatives
 
 This is an active space. Other tools tackle overlapping problems:
 
-| Tool | Approach | MCP | Impact Analysis | Anti-hallucination tools | Hybrid Search |
-|------|----------|-----|----------------|--------------------------|---------------|
-| **codegraph** | AST graph + SQLite + hybrid RAG | ✅ | ✅ | ✅ `get_source`, `verify_signature` | ✅ BM25+FAISS+RRF |
-| codebase-memory-mcp | Graph DB + tree-sitter | ✅ | ❌ | ❌ | ❌ |
-| code-graph-mcp | AST knowledge graph | ✅ | ❌ | ❌ | BM25 only |
-| codesight-mcp | tree-sitter, 34 tools | ✅ | ❌ | ❌ | ❌ |
-| repomix | File packing for LLMs | ✅ | ❌ | ❌ | ❌ |
-| Sourcegraph | Code search, human UI | ❌ | ❌ | ❌ | ✅ |
+| Tool | Approach | MCP | Impact Analysis | Anti-hallucination | Code Embeddings | LangChain |
+|------|----------|-----|----------------|-------------------|-----------------|-----------|
+| **codegraph** | AST graph + dual HF models | ✅ | ✅ | ✅ | ✅ CodeBERT | ✅ |
+| codebase-memory-mcp | Graph DB + tree-sitter | ✅ | ❌ | ❌ | ❌ | ❌ |
+| code-graph-mcp | AST knowledge graph | ✅ | ❌ | ❌ | ❌ | ❌ |
+| codesight-mcp | tree-sitter, 34 tools | ✅ | ❌ | ❌ | ❌ | ❌ |
+| repomix | File packing for LLMs | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Sourcegraph | Code search, human UI | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 The core difference: other tools help agents *navigate* code. codegraph also helps agents *trust* what they know about it.
 

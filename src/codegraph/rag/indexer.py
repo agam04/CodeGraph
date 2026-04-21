@@ -1,9 +1,24 @@
+"""RAG indexer: chunks + embeds documentation and code symbols.
+
+Uses a dual-model strategy:
+- Code symbols (functions, classes): CodeBERT embeddings — better semantic
+  search for "what does this function do?" queries against source code.
+- Documentation (README, /docs, docstrings): all-MiniLM-L6-v2 — optimised
+  for natural language similarity.
+
+Both indices are stored in memory and used together in the retriever via
+Reciprocal Rank Fusion.
+"""
+
 import re
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 from codegraph.graph.schema import Edge, EdgeType, Node, NodeType
 from codegraph.graph.store import GraphStore
+from codegraph.rag.embedders import CodeAwareEmbedder
 from codegraph.utils.hashing import hash_content, node_id
 from codegraph.utils.logging import get_logger
 
@@ -14,26 +29,36 @@ _DOC_EXTS = {".md", ".rst", ".txt"}
 
 
 class DocIndexer:
-    def __init__(self, store: GraphStore, chunk_size: int = 500, chunk_overlap: int = 50) -> None:
+    def __init__(
+        self,
+        store: GraphStore,
+        chunk_size: int = 500,
+        chunk_overlap: int = 50,
+        code_model: str = "microsoft/codebert-base",
+        text_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+    ) -> None:
         self.store = store
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        self._embedder = None
-        self._faiss_index = None
-        self._chunk_ids: list[str] = []
+        self._embedder = CodeAwareEmbedder(
+            code_model_name=code_model,
+            text_model_name=text_model,
+        )
 
-    def _get_embedder(self):
-        if self._embedder is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-                self._embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-            except ImportError:
-                log.warning("sentence_transformers_not_installed")
-        return self._embedder
+        # Separate FAISS indices for docs (text model) and code (code model)
+        self._doc_faiss = None
+        self._doc_chunk_ids: list[str] = []
+
+        self._code_faiss = None
+        self._code_node_ids: list[str] = []
+
+    # ── Public ─────────────────────────────────────────────────────────────────
 
     def index_repo(self, root_path: Path) -> int:
+        """Index all documentation in the repo and embed code symbols."""
         docs = self._find_docs(root_path)
         chunks_indexed = 0
+
         for doc_path in docs:
             try:
                 content = doc_path.read_text(errors="replace")
@@ -57,32 +82,56 @@ class DocIndexer:
                     )
                     self.store.upsert_node(chunk_node)
                     chunks_indexed += 1
-                    # Link to code nodes mentioned in chunk
                     self._link_to_code(chunk_id, chunk)
             except Exception as e:
                 log.error("doc_index_error", path=str(doc_path), error=str(e))
 
         self.store.commit()
+        self._build_doc_faiss()
+        self._build_code_faiss()
 
-        # Build FAISS index
-        self._build_faiss()
         log.info("docs_indexed", chunks=chunks_indexed)
         return chunks_indexed
 
+    def get_doc_faiss(self):
+        return self._doc_faiss
+
+    def get_doc_chunk_ids(self) -> list[str]:
+        return self._doc_chunk_ids
+
+    def get_code_faiss(self):
+        return self._code_faiss
+
+    def get_code_node_ids(self) -> list[str]:
+        return self._code_node_ids
+
+    def get_embedder(self) -> CodeAwareEmbedder:
+        return self._embedder
+
+    # kept for backward compat with tests/retriever that call _get_embedder()
+    def _get_embedder(self) -> CodeAwareEmbedder:
+        return self._embedder
+
+    # kept for retriever backward compat
+    def get_faiss_index(self):
+        return self._doc_faiss
+
+    def get_chunk_ids(self) -> list[str]:
+        return self._doc_chunk_ids
+
+    # ── Private ────────────────────────────────────────────────────────────────
+
     def _find_docs(self, root: Path) -> list[Path]:
         docs: list[Path] = []
-        # Root README
         for name in ("README.md", "README.rst", "README.txt"):
             p = root / name
             if p.exists():
                 docs.append(p)
-        # Doc directories
         for d in root.iterdir():
             if d.is_dir() and d.name.lower() in _DOC_DIRS:
                 for f in d.rglob("*"):
                     if f.is_file() and f.suffix in _DOC_EXTS:
                         docs.append(f)
-        # All .md files in repo
         for f in root.rglob("*.md"):
             if f not in docs:
                 docs.append(f)
@@ -93,13 +142,11 @@ class DocIndexer:
         chunks = []
         i = 0
         while i < len(words):
-            chunk_words = words[i:i + self.chunk_size]
-            chunks.append(" ".join(chunk_words))
+            chunks.append(" ".join(words[i : i + self.chunk_size]))
             i += self.chunk_size - self.chunk_overlap
         return chunks or [text]
 
     def _link_to_code(self, chunk_id: str, text: str) -> None:
-        # Find backtick-enclosed names like `authenticate()` or `MyClass`
         pattern = re.compile(r"`([A-Za-z_][A-Za-z0-9_.]*)\(?[^`]*`")
         for match in pattern.finditer(text):
             name = match.group(1).split(".")[0]
@@ -107,32 +154,59 @@ class DocIndexer:
             if node:
                 self.store.upsert_edges([Edge(chunk_id, node.id, EdgeType.DOCUMENTS)])
 
-    def _build_faiss(self) -> None:
-        embedder = self._get_embedder()
-        if embedder is None:
-            return
+    def _build_doc_faiss(self) -> None:
+        """Build FAISS index for doc chunks using the text embedding model."""
         try:
             import faiss
-            import numpy as np
             chunks = self.store.get_all_nodes(NodeType.DOC_CHUNK)
             if not chunks:
                 return
             texts = [n.metadata.get("content", n.docstring or n.name) for n in chunks]
-            self._chunk_ids = [n.id for n in chunks]
-            embeddings = embedder.encode(texts, show_progress_bar=False)
-            embeddings = np.array(embeddings, dtype="float32")
-            dim = embeddings.shape[1]
-            index = faiss.IndexFlatL2(dim)
+            self._doc_chunk_ids = [n.id for n in chunks]
+            embeddings = self._embedder.embed_text(texts)
+            embeddings = embeddings.astype("float32")
+            index = faiss.IndexFlatL2(embeddings.shape[1])
             index.add(embeddings)
-            self._faiss_index = index
-            log.info("faiss_index_built", vectors=len(texts), dim=dim)
+            self._doc_faiss = index
+            log.info("doc_faiss_built", vectors=len(texts), model="text")
         except ImportError:
             log.warning("faiss_not_installed")
         except Exception as e:
-            log.error("faiss_build_error", error=str(e))
+            log.error("doc_faiss_error", error=str(e))
 
-    def get_faiss_index(self):
-        return self._faiss_index
+    def _build_code_faiss(self) -> None:
+        """Build FAISS index for code symbols using the code embedding model.
 
-    def get_chunk_ids(self) -> list[str]:
-        return self._chunk_ids
+        This is the key differentiator: searching for 'password hashing' will
+        surface functions that hash passwords even if none mention it in their
+        docstring, because CodeBERT was trained on code/docstring alignment.
+        """
+        try:
+            import faiss
+            from codegraph.graph.schema import NodeType as NT
+            code_nodes = (
+                self.store.get_all_nodes(NT.FUNCTION)
+                + self.store.get_all_nodes(NT.METHOD)
+                + self.store.get_all_nodes(NT.CLASS)
+            )
+            if not code_nodes:
+                return
+
+            # Embed the signature + docstring as the code representation
+            texts = []
+            for n in code_nodes:
+                sig = n.signature or ""
+                doc = n.docstring or ""
+                texts.append(f"{n.qualified_name} {sig} {doc}".strip())
+
+            self._code_node_ids = [n.id for n in code_nodes]
+            embeddings = self._embedder.embed_code(texts)
+            embeddings = embeddings.astype("float32")
+            index = faiss.IndexFlatL2(embeddings.shape[1])
+            index.add(embeddings)
+            self._code_faiss = index
+            log.info("code_faiss_built", vectors=len(texts), model="code")
+        except ImportError:
+            log.warning("faiss_not_installed")
+        except Exception as e:
+            log.error("code_faiss_error", error=str(e))

@@ -108,6 +108,29 @@ def reindex(repo: Path, data_dir: Optional[Path]):
 
 @cli.command()
 @click.option("--data-dir", type=click.Path(path_type=Path), default=None)
+@click.option("--overwrite", is_flag=True, default=False, help="Re-generate even if already enriched.")
+@click.option("--model", default="Salesforce/codet5-base-codexglue-sum-python", help="HuggingFace model for generation.")
+def enrich(data_dir: Optional[Path], overwrite: bool, model: str):
+    """Generate docstrings for undocumented functions using CodeT5 (HuggingFace).
+
+    Runs after `codegraph index`. Stores generated docstrings in the graph
+    under metadata.generated_docstring — distinct from AST-extracted docstrings
+    so provenance is always clear.
+    """
+    config, store = _build_store_and_config(None, data_dir)
+    from codegraph.rag.docgen import DocstringGenerator
+    generator = DocstringGenerator(model_name=model)
+    with console.status("[bold magenta]Generating docstrings with CodeT5..."):
+        result = generator.enrich_store(store, overwrite=overwrite)
+    console.print(
+        f"[magenta]✓[/magenta] Generated: {result['generated']}  "
+        f"Skipped: {result['skipped']}  Failed: {result['failed']}"
+    )
+    store.close()
+
+
+@cli.command()
+@click.option("--data-dir", type=click.Path(path_type=Path), default=None)
 def stats(data_dir: Optional[Path]):
     """Show codebase statistics."""
     config, store = _build_store_and_config(None, data_dir)

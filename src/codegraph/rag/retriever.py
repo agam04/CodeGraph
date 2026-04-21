@@ -1,3 +1,16 @@
+"""Hybrid retriever: BM25 + dual-FAISS (code index + doc index) with RRF.
+
+Search pipeline:
+1. BM25 keyword search over doc chunks
+2. FAISS vector search over doc chunks (text model)
+3. FAISS vector search over code symbols (code model — CodeBERT)
+4. Merge all three result lists with Reciprocal Rank Fusion
+
+This three-way fusion means a query like "how does password hashing work?" will
+surface both documentation chunks that mention passwords AND functions like
+`hash_password` that the code model recognises as semantically related.
+"""
+
 from typing import Optional
 
 from codegraph.graph.schema import EdgeType, Node, NodeType
@@ -6,8 +19,7 @@ from codegraph.utils.logging import get_logger
 
 log = get_logger(__name__)
 
-# Reciprocal Rank Fusion constant — 60 is the standard value from the original RRF paper
-_RRF_K = 60
+_RRF_K = 60  # standard constant from the original RRF paper (Cormack et al. 2009)
 
 
 class RAGRetriever:
@@ -16,58 +28,33 @@ class RAGRetriever:
         self._indexer = indexer
         self._bm25 = None
         self._bm25_ids: list[str] = []
-        self._bm25_corpus: list[list[str]] = []
-
-    def _build_bm25(self) -> None:
-        """Build a BM25 index over all DOC_CHUNK nodes for keyword search."""
-        try:
-            from rank_bm25 import BM25Okapi
-        except ImportError:
-            log.warning("rank_bm25_not_installed")
-            return
-
-        chunks = self.store.get_all_nodes(NodeType.DOC_CHUNK)
-        if not chunks:
-            return
-
-        corpus = []
-        ids = []
-        for chunk in chunks:
-            text = chunk.metadata.get("content", chunk.docstring or chunk.name)
-            corpus.append(text.lower().split())
-            ids.append(chunk.id)
-
-        self._bm25 = BM25Okapi(corpus)
-        self._bm25_ids = ids
-        self._bm25_corpus = corpus
 
     def search_docs(self, query: str, k: int = 5) -> list[dict]:
-        """Hybrid search: BM25 + FAISS vector similarity, merged with Reciprocal Rank Fusion."""
+        """Three-way hybrid search: BM25 + doc-FAISS + code-FAISS, merged via RRF."""
         if self._indexer is None:
             return self._text_search_docs(query, k)
 
-        faiss_index = self._indexer.get_faiss_index()
-        chunk_ids = self._indexer.get_chunk_ids()
         bm25_results = self._bm25_search(query, k * 2)
-        vector_results = self._faiss_search(query, k * 2, faiss_index, chunk_ids)
+        doc_vec_results = self._faiss_search_docs(query, k * 2)
+        code_vec_results = self._faiss_search_code(query, k * 2)
 
-        if not bm25_results and not vector_results:
+        if not bm25_results and not doc_vec_results and not code_vec_results:
             return self._text_search_docs(query, k)
 
-        # Reciprocal Rank Fusion: score = Σ 1/(rank_i + k) across all result lists
         rrf_scores: dict[str, float] = {}
-        for rank, (chunk_id, _) in enumerate(bm25_results):
-            rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + 1.0 / (rank + _RRF_K)
-        for rank, (chunk_id, _) in enumerate(vector_results):
-            rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0.0) + 1.0 / (rank + _RRF_K)
+        for rank, (nid, _) in enumerate(bm25_results):
+            rrf_scores[nid] = rrf_scores.get(nid, 0.0) + 1.0 / (rank + _RRF_K)
+        for rank, (nid, _) in enumerate(doc_vec_results):
+            rrf_scores[nid] = rrf_scores.get(nid, 0.0) + 1.0 / (rank + _RRF_K)
+        for rank, (nid, _) in enumerate(code_vec_results):
+            rrf_scores[nid] = rrf_scores.get(nid, 0.0) + 1.0 / (rank + _RRF_K)
 
         ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:k]
-
         results = []
-        for chunk_id, rrf_score in ranked:
-            node = self.store.get_node(chunk_id)
+        for nid, rrf_score in ranked:
+            node = self.store.get_node(nid)
             if node:
-                results.append(self._node_to_chunk(node, relevance=rrf_score))
+                results.append(self._node_to_result(node, relevance=rrf_score))
         return results
 
     def _bm25_search(self, query: str, k: int) -> list[tuple[str, float]]:
@@ -76,37 +63,76 @@ class RAGRetriever:
         if self._bm25 is None or not self._bm25_ids:
             return []
         try:
-            tokenized = query.lower().split()
-            scores = self._bm25.get_scores(tokenized)
-            top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
-            return [(self._bm25_ids[i], float(scores[i])) for i in top_indices if scores[i] > 0]
+            from rank_bm25 import BM25Okapi
+            scores = self._bm25.get_scores(query.lower().split())
+            top = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
+            return [(self._bm25_ids[i], float(scores[i])) for i in top if scores[i] > 0]
         except Exception as e:
-            log.error("bm25_search_error", error=str(e))
+            log.error("bm25_error", error=str(e))
             return []
 
-    def _faiss_search(self, query: str, k: int, faiss_index, chunk_ids: list[str]) -> list[tuple[str, float]]:
-        if faiss_index is None or not chunk_ids:
+    def _faiss_search_docs(self, query: str, k: int) -> list[tuple[str, float]]:
+        index = self._indexer.get_doc_faiss()
+        ids = self._indexer.get_doc_chunk_ids()
+        if index is None or not ids:
             return []
         try:
             import numpy as np
-            embedder = self._indexer._get_embedder()
-            if embedder is None:
-                return []
-            q_emb = embedder.encode([query], show_progress_bar=False)
-            q_emb = np.array(q_emb, dtype="float32")
-            distances, indices = faiss_index.search(q_emb, min(k, len(chunk_ids)))
+            embedder = self._indexer.get_embedder()
+            q = embedder.embed_text([query]).astype("float32")
+            dists, indices = index.search(q, min(k, len(ids)))
             return [
-                (chunk_ids[idx], float(1 / (1 + dist)))
-                for dist, idx in zip(distances[0], indices[0])
-                if 0 <= idx < len(chunk_ids)
+                (ids[i], float(1 / (1 + d)))
+                for d, i in zip(dists[0], indices[0])
+                if 0 <= i < len(ids)
             ]
         except Exception as e:
-            log.error("faiss_search_error", error=str(e))
+            log.error("doc_faiss_error", error=str(e))
             return []
+
+    def _faiss_search_code(self, query: str, k: int) -> list[tuple[str, float]]:
+        """Search code symbols using the code-specific embedding model."""
+        index = self._indexer.get_code_faiss()
+        ids = self._indexer.get_code_node_ids()
+        if index is None or not ids:
+            return []
+        try:
+            import numpy as np
+            embedder = self._indexer.get_embedder()
+            # Query is natural language — use text model for the query embedding,
+            # but search against code embeddings (cross-modal retrieval)
+            q = embedder.embed_text([query]).astype("float32")
+            # Resize if dimension mismatch (code model vs text model dims differ)
+            if q.shape[1] != index.d:
+                return []
+            dists, indices = index.search(q, min(k, len(ids)))
+            return [
+                (ids[i], float(1 / (1 + d)))
+                for d, i in zip(dists[0], indices[0])
+                if 0 <= i < len(ids)
+            ]
+        except Exception as e:
+            log.error("code_faiss_error", error=str(e))
+            return []
+
+    def _build_bm25(self) -> None:
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError:
+            return
+        chunks = self.store.get_all_nodes(NodeType.DOC_CHUNK)
+        if not chunks:
+            return
+        corpus = [
+            n.metadata.get("content", n.docstring or n.name).lower().split()
+            for n in chunks
+        ]
+        self._bm25 = BM25Okapi(corpus)
+        self._bm25_ids = [n.id for n in chunks]
 
     def _text_search_docs(self, query: str, k: int) -> list[dict]:
         chunks = self.store.search_nodes(query, NodeType.DOC_CHUNK, limit=k)
-        return [self._node_to_chunk(c) for c in chunks]
+        return [self._node_to_result(c) for c in chunks]
 
     def docs_for_node(self, node_id: str) -> list[dict]:
         edges = self.store.get_edges_to(node_id, EdgeType.DOCUMENTS)
@@ -114,14 +140,17 @@ class RAGRetriever:
         for edge in edges:
             chunk = self.store.get_node(edge.source_id)
             if chunk and chunk.node_type == NodeType.DOC_CHUNK:
-                results.append(self._node_to_chunk(chunk))
+                results.append(self._node_to_result(chunk))
         return results
 
     @staticmethod
-    def _node_to_chunk(node: Node, relevance: Optional[float] = None) -> dict:
+    def _node_to_result(node: Node, relevance: Optional[float] = None) -> dict:
+        is_code = node.node_type in (NodeType.FUNCTION, NodeType.METHOD, NodeType.CLASS)
         return {
             "id": node.id,
             "content": node.metadata.get("content", node.docstring or node.name),
             "source": node.metadata.get("source", node.file_path),
             "relevance_score": relevance,
+            "node_type": node.node_type.value,
+            "result_kind": "code_symbol" if is_code else "documentation",
         }
