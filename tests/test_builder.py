@@ -1,10 +1,7 @@
-from pathlib import Path
 
-import pytest
 
 from codegraph.graph.builder import GraphBuilder
 from codegraph.graph.schema import NodeType
-from codegraph.graph.store import GraphStore
 
 
 def test_build_sample_python_repo(sample_python_repo, tmp_db, test_config):
@@ -63,7 +60,7 @@ def test_excludes_pycache(sample_python_repo, tmp_db, test_config, tmp_path):
     (pycache / "cached.py").write_text("x = 1")
 
     builder = GraphBuilder(repo_copy, tmp_db, test_config)
-    stats = builder.build(incremental=False)
+    builder.build(incremental=False)
 
     # Cached file should not be indexed
     files = tmp_db.get_all_files()

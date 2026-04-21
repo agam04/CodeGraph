@@ -1,8 +1,8 @@
-from typing import Annotated, Optional
+from typing import Optional
 
 import strawberry
 
-from codegraph.graph import EdgeType, NodeType
+from codegraph.graph import NodeType
 from codegraph.graph import queries as gq
 from codegraph.graph.store import GraphStore
 from codegraph.rag.retriever import RAGRetriever

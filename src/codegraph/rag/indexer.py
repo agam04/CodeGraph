@@ -12,9 +12,7 @@ Reciprocal Rank Fusion.
 
 import re
 from pathlib import Path
-from typing import Optional
 
-import numpy as np
 
 from codegraph.graph.schema import Edge, EdgeType, Node, NodeType
 from codegraph.graph.store import GraphStore

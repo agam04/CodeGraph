@@ -1,6 +1,4 @@
-from pathlib import Path
 
-import strawberry
 from fastapi import FastAPI
 from strawberry.fastapi import GraphQLRouter
 

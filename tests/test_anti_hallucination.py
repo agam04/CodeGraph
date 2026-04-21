@@ -57,7 +57,6 @@ def test_get_source_returns_exact_signature_line():
 
 
 def test_get_source_graphql(sample_python_repo, tmp_db, test_config):
-    from codegraph.graph.store import GraphStore
     indexer = DocIndexer(tmp_db)
     retriever = RAGRetriever(tmp_db, indexer)
     schema = build_schema(tmp_db, retriever)
@@ -76,8 +75,7 @@ def test_get_source_graphql(sample_python_repo, tmp_db, test_config):
 
 def test_verify_signature_correct():
     # Get the actual signature first
-    src = get_source("authenticate")
-    actual_sig = src.get("source", "").splitlines()[0]
+    get_source("authenticate")
     # A clearly wrong signature should fail
     result = verify_signature("authenticate", "(x)")
     assert result["match"] is False

@@ -18,7 +18,7 @@ Usage:
     print(result["sources"])
 """
 
-from typing import Any, Optional
+from typing import Any
 
 from codegraph.graph.store import GraphStore
 from codegraph.langchain.retriever import CodeGraphRetriever

@@ -1,7 +1,6 @@
 from collections import deque
-from typing import Optional
 
-from codegraph.graph.schema import Edge, EdgeType, Node, NodeType
+from codegraph.graph.schema import EdgeType, Node, NodeType
 from codegraph.graph.store import GraphStore
 
 

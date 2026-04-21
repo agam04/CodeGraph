@@ -3,8 +3,7 @@
 All tests mock heavy model downloads so they run fast in CI without a GPU.
 """
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest

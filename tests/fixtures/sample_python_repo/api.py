@@ -2,7 +2,7 @@
 from typing import Optional
 
 from sample_python_repo.auth import authenticate, invalidate_session
-from sample_python_repo.models import Session, User
+from sample_python_repo.models import User
 
 _USERS: dict = {}
 _SESSIONS: dict = {}

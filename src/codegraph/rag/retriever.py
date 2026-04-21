@@ -63,7 +63,6 @@ class RAGRetriever:
         if self._bm25 is None or not self._bm25_ids:
             return []
         try:
-            from rank_bm25 import BM25Okapi
             scores = self._bm25.get_scores(query.lower().split())
             top = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
             return [(self._bm25_ids[i], float(scores[i])) for i in top if scores[i] > 0]
@@ -77,7 +76,6 @@ class RAGRetriever:
         if index is None or not ids:
             return []
         try:
-            import numpy as np
             embedder = self._indexer.get_embedder()
             q = embedder.embed_text([query]).astype("float32")
             dists, indices = index.search(q, min(k, len(ids)))
@@ -97,7 +95,6 @@ class RAGRetriever:
         if index is None or not ids:
             return []
         try:
-            import numpy as np
             embedder = self._indexer.get_embedder()
             # Query is natural language — use text model for the query embedding,
             # but search against code embeddings (cross-modal retrieval)

@@ -1,8 +1,7 @@
 import json
 import sqlite3
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Optional
 
 from codegraph.graph.schema import Edge, EdgeType, Node, NodeType
 from codegraph.utils.logging import get_logger
@@ -85,7 +84,7 @@ class GraphStore:
             placeholders = ",".join("?" * len(node_ids))
             self._conn.execute(f"DELETE FROM edges WHERE source_id IN ({placeholders})", node_ids)
             self._conn.execute(f"DELETE FROM edges WHERE target_id IN ({placeholders})", node_ids)
-            self._conn.execute(f"DELETE FROM nodes WHERE file_path = ?", (path,))
+            self._conn.execute("DELETE FROM nodes WHERE file_path = ?", (path,))
 
     # ── Nodes ──────────────────────────────────────────────────────────────────
 

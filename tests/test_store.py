@@ -1,7 +1,5 @@
-import pytest
 
 from codegraph.graph.schema import Edge, EdgeType, Node, NodeType
-from codegraph.graph.store import GraphStore
 
 
 def _make_node(name: str, ntype: NodeType = NodeType.FUNCTION, file_path: str = "test.py") -> Node:

@@ -7,7 +7,6 @@ from codegraph.config import CodegraphConfig, get_config
 from codegraph.graph import GraphBuilder, GraphStore
 from codegraph.graph import queries as gq
 from codegraph.graph.schema import NodeType
-from codegraph.rag.indexer import DocIndexer
 from codegraph.rag.retriever import RAGRetriever
 from codegraph.utils.logging import get_logger
 

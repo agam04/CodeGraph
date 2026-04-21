@@ -10,7 +10,6 @@ regardless of their prose description. Code-specific models trained on
 CodeSearchNet achieve this because they've seen millions of code/docstring pairs.
 """
 
-from typing import Optional
 
 import numpy as np
 
