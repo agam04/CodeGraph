@@ -218,7 +218,8 @@ graph LR
     RRF --> MCP[MCP Server\nFastMCP · 16 tools]
     GraphQL --> MCP
     MCP --> Agent[AI Agent]
-    MCP --> LangChain[LangChain\nCodebaseQA]
+    MCP --> LangChain[LangGraph Agent\nRouter + ReAct · 16 tools]
+    LangChain --> Fallback[Hybrid Retrieval\nFallback]
     Agent -->|verify_signature\nget_source| MCP
 ```
 
@@ -339,18 +340,74 @@ pip install "codegraph[langchain]"
 
 ---
 
+## Agentic RAG
+
+The static `CodebaseQA` chain always calls the retriever once and hands the result to an LLM. The agentic layer goes further: a **LangGraph orchestrated ReAct agent** reasons about *which* of the 16 tools to call, chains tool calls, and falls back to hybrid retrieval if it fails.
+
+```
+query → router (structural / lookup / semantic)
+      → ReAct agent (max 5 iterations, category-filtered toolset)
+      → [fallback: hybrid BM25+FAISS retrieval if cap exceeded or tool error]
+```
+
+The router narrows 16 tools to the relevant 6 before the agent sees them — preventing context dilution and improving tool selection on smaller models.
+
+```python
+from codegraph.langchain.agent import CodeGraphAgent
+from codegraph.graph.store import GraphStore
+from codegraph.rag.indexer import DocIndexer
+from codegraph.rag.retriever import RAGRetriever
+from langchain_anthropic import ChatAnthropic
+
+store = GraphStore("./data/codegraph.db")
+rag = RAGRetriever(store, DocIndexer(store))
+
+agent = CodeGraphAgent(store, rag, llm=ChatAnthropic(model="claude-sonnet-4-6"))
+
+# Conversation memory maintained per thread_id
+result = agent.ask("What calls authenticate()?", thread_id="session-1")
+print(result["answer"])
+print(result["router_category"])   # "structural"
+print(result["source"])            # "agent" or "fallback_retrieval"
+print(result["fallback_reason"])   # None | "iteration_cap_exceeded" | "tool_error"
+
+# Follow-up question — conversation history preserved
+result = agent.ask("What is the risk of changing it?", thread_id="session-1")
+```
+
+### Eval Results — 50 questions, Claude Sonnet 4.6
+
+| Category | N | Answer% | Router% | Fallback% |
+|---|---|---|---|---|
+| Structural | 15 | **100%** | **100%** | 0% |
+| Lookup | 20 | 70% | 75% | 25%† |
+| Semantic | 15 | 87% | **100%** | 7% |
+| **Overall** | **50** | **84%** | **90%** | 12% |
+
+†5 of 6 fallbacks were API rate-limit errors mid-run, not agent failures.
+
+```bash
+# Run evals against any indexed repo
+python evals/run_evals.py --data-dir ./data --llm claude
+python evals/run_evals.py --data-dir ./data --llm openai
+python evals/run_evals.py --data-dir ./data --llm gemini
+python evals/run_evals.py --data-dir ./data --filter s   # structural only
+```
+
+---
+
 ## Comparison with Alternatives
 
 This is an active space. Other tools tackle overlapping problems:
 
-| Tool | Approach | MCP | Impact Analysis | Anti-hallucination | Code Embeddings | LangChain |
-|------|----------|-----|----------------|-------------------|-----------------|-----------|
-| **codegraph** | AST graph + dual HF models | ✅ | ✅ | ✅ | ✅ CodeBERT | ✅ |
-| codebase-memory-mcp | Graph DB + tree-sitter | ✅ | ❌ | ❌ | ❌ | ❌ |
-| code-graph-mcp | AST knowledge graph | ✅ | ❌ | ❌ | ❌ | ❌ |
-| codesight-mcp | tree-sitter, 34 tools | ✅ | ❌ | ❌ | ❌ | ❌ |
-| repomix | File packing for LLMs | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Sourcegraph | Code search, human UI | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Tool | Approach | MCP | Impact Analysis | Anti-hallucination | Code Embeddings | LangChain | Agentic RAG |
+|------|----------|-----|----------------|-------------------|-----------------|-----------|-------------|
+| **codegraph** | AST graph + dual HF models | ✅ | ✅ | ✅ | ✅ CodeBERT | ✅ | ✅ LangGraph |
+| codebase-memory-mcp | Graph DB + tree-sitter | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| code-graph-mcp | AST knowledge graph | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| codesight-mcp | tree-sitter, 34 tools | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| repomix | File packing for LLMs | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Sourcegraph | Code search, human UI | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 The core difference: other tools help agents *navigate* code. codegraph also helps agents *trust* what they know about it.
 

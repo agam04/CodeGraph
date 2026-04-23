@@ -1,0 +1,322 @@
+# codegraph agent eval set — 50 questions
+#
+# Each entry:
+#   id:                    unique identifier
+#   question:              the natural language query
+#   category:              expected router classification (structural | lookup | semantic)
+#   expected_tools:        list of tool names the agent should call (at least one must match)
+#   expected_answer_contains: list of strings that should appear in the final answer (case-insensitive)
+#   notes:                 optional — explains why this case is interesting or tricky
+
+# ── STRUCTURAL (15 questions) ─────────────────────────────────────────────────
+
+- id: s01
+  question: "What functions call authenticate()?"
+  category: structural
+  expected_tools: [find_callers]
+  expected_answer_contains: [authenticate, caller]
+
+- id: s02
+  question: "Who calls the login function?"
+  category: structural
+  expected_tools: [find_callers]
+  expected_answer_contains: [login]
+
+- id: s03
+  question: "What does authenticate() call internally?"
+  category: structural
+  expected_tools: [find_callees]
+  expected_answer_contains: [authenticate]
+
+- id: s04
+  question: "What are the dependencies of the auth module?"
+  category: structural
+  expected_tools: [file_dependencies]
+  expected_answer_contains: [auth]
+
+- id: s05
+  question: "Is it safe to change the authenticate function?"
+  category: structural
+  expected_tools: [impact_analysis]
+  expected_answer_contains: [risk, caller]
+
+- id: s06
+  question: "What is the impact of modifying the User model?"
+  category: structural
+  expected_tools: [impact_analysis]
+  expected_answer_contains: [impact, risk]
+
+- id: s07
+  question: "Which functions have no callers?"
+  category: structural
+  expected_tools: [find_dead_code]
+  expected_answer_contains: [dead, caller]
+
+- id: s08
+  question: "Are there any unused functions I can safely delete?"
+  category: structural
+  expected_tools: [find_dead_code]
+  expected_answer_contains: []
+
+- id: s09
+  question: "What files import auth.py?"
+  category: structural
+  expected_tools: [file_dependencies]
+  expected_answer_contains: [auth]
+
+- id: s10
+  question: "Show me the call chain leading up to hash_password"
+  category: structural
+  expected_tools: [find_callers]
+  expected_answer_contains: [hash_password]
+
+- id: s11
+  question: "What would break if I removed the invalidate_session function?"
+  category: structural
+  expected_tools: [impact_analysis]
+  expected_answer_contains: [invalidate_session]
+
+- id: s12
+  question: "Who calls register_user and what does it depend on?"
+  category: structural
+  expected_tools: [find_callers, find_callees]
+  expected_answer_contains: [register_user]
+
+- id: s13
+  question: "Which files does models.py depend on?"
+  category: structural
+  expected_tools: [file_dependencies]
+  expected_answer_contains: [models]
+
+- id: s14
+  question: "Give me the full context around authenticate() including callers and callees"
+  category: structural
+  expected_tools: [get_context]
+  expected_answer_contains: [authenticate]
+
+- id: s15
+  question: "What is the transitive call graph starting from login()?"
+  category: structural
+  expected_tools: [find_callees, get_context]
+  expected_answer_contains: [login]
+
+# ── LOOKUP (20 questions) ─────────────────────────────────────────────────────
+
+- id: l01
+  question: "Show me the exact source code of the authenticate function"
+  category: lookup
+  expected_tools: [get_source]
+  expected_answer_contains: [authenticate, def]
+  notes: "Classic get_source case — should not hallucinate implementation"
+
+- id: l02
+  question: "What is the signature of hash_password?"
+  category: lookup
+  expected_tools: [find_function, verify_signature]
+  expected_answer_contains: [hash_password]
+
+- id: l03
+  question: "Where is the User class defined?"
+  category: lookup
+  expected_tools: [find_class]
+  expected_answer_contains: [User, file]
+
+- id: l04
+  question: "What methods does the User class have?"
+  category: lookup
+  expected_tools: [find_class]
+  expected_answer_contains: [User, method]
+
+- id: l05
+  question: "Find the authenticate function and show me where it is"
+  category: lookup
+  expected_tools: [find_function]
+  expected_answer_contains: [authenticate, file, line]
+
+- id: l06
+  question: "Is the login function async?"
+  category: lookup
+  expected_tools: [find_function]
+  expected_answer_contains: [login]
+
+- id: l07
+  question: "Show me the source of the Session class"
+  category: lookup
+  expected_tools: [get_source]
+  expected_answer_contains: [Session]
+
+- id: l08
+  question: "What does create_session return?"
+  category: lookup
+  expected_tools: [find_function, get_source]
+  expected_answer_contains: [create_session]
+
+- id: l09
+  question: "Verify whether authenticate takes username and password as parameters"
+  category: lookup
+  expected_tools: [verify_signature]
+  expected_answer_contains: [authenticate, signature]
+  notes: "Direct verify_signature trigger"
+
+- id: l10
+  question: "Is the signature of authenticate (username: str, password: str) correct?"
+  category: lookup
+  expected_tools: [verify_signature]
+  expected_answer_contains: [authenticate, correct, wrong]
+  notes: "Adversarial — may or may not be correct, agent must check"
+
+- id: l11
+  question: "Generate a call graph diagram for the authenticate function"
+  category: lookup
+  expected_tools: [get_diagram]
+  expected_answer_contains: [mermaid, authenticate]
+
+- id: l12
+  question: "Show me a Mermaid diagram of the login flow"
+  category: lookup
+  expected_tools: [get_diagram]
+  expected_answer_contains: [mermaid]
+
+- id: l13
+  question: "How many tokens would I save by querying authenticate through codegraph instead of reading files?"
+  category: lookup
+  expected_tools: [token_savings_estimate]
+  expected_answer_contains: [token, saving]
+
+- id: l14
+  question: "Where is validate_password defined and what does it do?"
+  category: lookup
+  expected_tools: [find_function, get_source]
+  expected_answer_contains: [validate_password]
+
+- id: l15
+  question: "Show me the exact implementation of hash_password"
+  category: lookup
+  expected_tools: [get_source]
+  expected_answer_contains: [hash_password, def]
+
+- id: l16
+  question: "What file is the register_user function in?"
+  category: lookup
+  expected_tools: [find_function]
+  expected_answer_contains: [register_user, file]
+
+- id: l17
+  question: "Does the Session class inherit from anything?"
+  category: lookup
+  expected_tools: [find_class]
+  expected_answer_contains: [Session]
+
+- id: l18
+  question: "What are the decorators on the login function?"
+  category: lookup
+  expected_tools: [find_function]
+  expected_answer_contains: [login]
+
+- id: l19
+  question: "Show me the docstring of authenticate"
+  category: lookup
+  expected_tools: [find_function, get_source]
+  expected_answer_contains: [authenticate, docstring]
+
+- id: l20
+  question: "What line does hash_password start on?"
+  category: lookup
+  expected_tools: [find_function]
+  expected_answer_contains: [hash_password, line]
+
+# ── SEMANTIC (15 questions) ────────────────────────────────────────────────────
+
+- id: e01
+  question: "How does authentication work in this codebase?"
+  category: semantic
+  expected_tools: [search_docs, find_function]
+  expected_answer_contains: [authenticate]
+  notes: "Open-ended concept question — semantic search is correct first move"
+
+- id: e02
+  question: "How is session management handled?"
+  category: semantic
+  expected_tools: [search_docs, search_code]
+  expected_answer_contains: [session]
+
+- id: e03
+  question: "Find the function responsible for password hashing"
+  category: semantic
+  expected_tools: [search_docs, search_code]
+  expected_answer_contains: [password, hash]
+
+- id: e04
+  question: "What does this codebase do?"
+  category: semantic
+  expected_tools: [codebase_stats, search_docs]
+  expected_answer_contains: []
+  notes: "High-level question — stats + docs is the right combo"
+
+- id: e05
+  question: "How many functions are in this codebase?"
+  category: semantic
+  expected_tools: [codebase_stats]
+  expected_answer_contains: [function]
+
+- id: e06
+  question: "Search for any code related to user registration"
+  category: semantic
+  expected_tools: [search_code, search_docs]
+  expected_answer_contains: [register, user]
+
+- id: e07
+  question: "Find functions that deal with passwords"
+  category: semantic
+  expected_tools: [search_code, search_docs]
+  expected_answer_contains: [password]
+
+- id: e08
+  question: "What languages are used in this project?"
+  category: semantic
+  expected_tools: [codebase_stats]
+  expected_answer_contains: [language, python]
+
+- id: e09
+  question: "Is there any code related to rate limiting or throttling?"
+  category: semantic
+  expected_tools: [search_docs, search_code]
+  expected_answer_contains: []
+  notes: "Negative case — if nothing found, agent should say so honestly"
+
+- id: e10
+  question: "How is error handling done in the authentication flow?"
+  category: semantic
+  expected_tools: [search_docs, search_code]
+  expected_answer_contains: [error, auth]
+
+- id: e11
+  question: "Find any utility functions related to validation"
+  category: semantic
+  expected_tools: [search_code]
+  expected_answer_contains: [valid]
+
+- id: e12
+  question: "What are the data models in this project?"
+  category: semantic
+  expected_tools: [search_code, search_docs]
+  expected_answer_contains: [model, class]
+
+- id: e13
+  question: "When was this codebase last indexed?"
+  category: semantic
+  expected_tools: [codebase_stats]
+  expected_answer_contains: [indexed, last]
+
+- id: e14
+  question: "Find documentation about how sessions expire"
+  category: semantic
+  expected_tools: [search_docs]
+  expected_answer_contains: [session]
+
+- id: e15
+  question: "Are there any functions that handle database connections?"
+  category: semantic
+  expected_tools: [search_code, search_docs]
+  expected_answer_contains: []
+  notes: "Negative case — no DB in sample repo, agent should respond honestly"
